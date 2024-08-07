@@ -322,6 +322,10 @@ export class Controller {
             extension.adjustMessageBeforePublish?.(entity, message);
         }
 
+        if(stateChangeReason) {
+            message._reason = stateChangeReason;
+        }
+
         // Filter mqtt message attributes
         utils.filterProperties(entity.options.filtered_attributes, message);
 

@@ -318,7 +318,7 @@ export default class Publish extends Extension {
 
         for (const [ID, payload] of Object.entries(toPublish)) {
             if (Object.keys(payload).length != 0) {
-                await this.publishEntityState(toPublishEntity[ID], payload);
+                await this.publishEntityState(toPublishEntity[ID], payload, 'preUpdate');
             }
         }
 
