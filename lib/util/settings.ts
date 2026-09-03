@@ -1,54 +1,58 @@
-import Ajv, {ValidateFunction} from 'ajv';
-import objectAssignDeep from 'object-assign-deep';
-import path from 'path';
+import path from "node:path";
+import type {ValidateFunction} from "ajv";
+import Ajv from "ajv";
+import data from "./data";
+import {objectAssignDeep} from "./objectAssignDeep";
+import schemaJson from "./settings.schema.json";
+import utils from "./utils";
+import yaml from "./yaml";
 
-import data from './data';
-import schemaJson from './settings.schema.json';
-import utils from './utils';
-import yaml from './yaml';
-export let schema = schemaJson;
-// @ts-ignore
-schema = {};
-objectAssignDeep(schema, schemaJson);
-
-// Remove legacy settings from schema
-{
-    delete schema.properties.advanced.properties.homeassistant_discovery_topic;
-    delete schema.properties.advanced.properties.homeassistant_legacy_entity_attributes;
-    delete schema.properties.advanced.properties.homeassistant_legacy_triggers;
-    delete schema.properties.advanced.properties.homeassistant_status_topic;
-    delete schema.properties.advanced.properties.soft_reset_timeout;
-    delete schema.properties.advanced.properties.report;
-    delete schema.properties.advanced.properties.baudrate;
-    delete schema.properties.advanced.properties.rtscts;
-    delete schema.properties.advanced.properties.ikea_ota_use_test_url;
-    delete schema.properties.experimental;
-    delete schemaJson.properties.whitelist;
-    delete schemaJson.properties.ban;
-}
-
+export {schemaJson};
+// When updating also update:
+// - https://github.com/Koenkk/zigbee2mqtt/blob/dev/data/configuration.example.yaml#L2
+export const CURRENT_VERSION = 5;
 /** NOTE: by order of priority, lower index is lower level (more important) */
-export const LOG_LEVELS: readonly string[] = ['error', 'warning', 'info', 'debug'] as const;
-export type LogLevel = (typeof LOG_LEVELS)[number];
+export const LOG_LEVELS: readonly string[] = ["error", "warning", "info", "debug"] as const;
+export type LogLevel = "error" | "warning" | "info" | "debug";
 
-// DEPRECATED ZIGBEE2MQTT_CONFIG: https://github.com/Koenkk/zigbee2mqtt/issues/4697
-const file = process.env.ZIGBEE2MQTT_CONFIG ?? data.joinPath('configuration.yaml');
-const NULLABLE_SETTINGS = ['homeassistant'];
-const ajvSetting = new Ajv({allErrors: true}).addKeyword('requiresRestart').compile(schemaJson);
-const ajvRestartRequired = new Ajv({allErrors: true}).addKeyword({keyword: 'requiresRestart', validate: (s: unknown) => !s}).compile(schemaJson);
+const CONFIG_FILE_PATH = data.joinPath("configuration.yaml");
+const NULLABLE_SETTINGS = ["homeassistant"];
+const ajvSetting = new Ajv({allErrors: true}).addKeyword("requiresRestart").compile(schemaJson);
+const ajvRestartRequired = new Ajv({allErrors: true}).addKeyword({keyword: "requiresRestart", validate: (s: unknown) => !s}).compile(schemaJson);
 const ajvRestartRequiredDeviceOptions = new Ajv({allErrors: true})
-    .addKeyword({keyword: 'requiresRestart', validate: (s: unknown) => !s})
+    .addKeyword({keyword: "requiresRestart", validate: (s: unknown) => !s})
     .compile(schemaJson.definitions.device);
 const ajvRestartRequiredGroupOptions = new Ajv({allErrors: true})
-    .addKeyword({keyword: 'requiresRestart', validate: (s: unknown) => !s})
+    .addKeyword({keyword: "requiresRestart", validate: (s: unknown) => !s})
     .compile(schemaJson.definitions.group);
-const defaults: RecursivePartial<Settings> = {
-    permit_join: false,
-    external_converters: [],
+export const defaults = {
+    homeassistant: {
+        enabled: false,
+        discovery_topic: "homeassistant",
+        status_topic: "homeassistant/status",
+        legacy_action_sensor: false,
+        experimental_event_entities: false,
+    },
+    availability: {
+        enabled: false,
+        active: {timeout: 10, max_jitter: 30000, backoff: true, pause_on_backoff_gt: 0},
+        passive: {timeout: 1500},
+    },
+    frontend: {
+        enabled: false,
+        package: "zigbee2mqtt-windfront",
+        port: 8080,
+        base_url: "/",
+    },
     mqtt: {
-        base_topic: 'zigbee2mqtt',
+        base_topic: "zigbee2mqtt",
         include_device_information: false,
         force_disable_retain: false,
+        // 1MB = roughly 3.5KB per device * 300 devices for `/bridge/devices`
+        maximum_packet_size: 1048576,
+        keepalive: 60,
+        reject_unauthorized: true,
+        version: 4,
     },
     serial: {
         disable_led: false,
@@ -59,18 +63,18 @@ const defaults: RecursivePartial<Settings> = {
         graphviz: {
             colors: {
                 fill: {
-                    enddevice: '#fff8ce',
-                    coordinator: '#e04e5d',
-                    router: '#4ea3e0',
+                    enddevice: "#fff8ce",
+                    coordinator: "#e04e5d",
+                    router: "#4ea3e0",
                 },
                 font: {
-                    coordinator: '#ffffff',
-                    router: '#ffffff',
-                    enddevice: '#000000',
+                    coordinator: "#ffffff",
+                    router: "#ffffff",
+                    enddevice: "#000000",
                 },
                 line: {
-                    active: '#009900',
-                    inactive: '#994444',
+                    active: "#009900",
+                    inactive: "#994444",
                 },
             },
         },
@@ -78,49 +82,54 @@ const defaults: RecursivePartial<Settings> = {
     ota: {
         update_check_interval: 24 * 60,
         disable_automatic_update_check: false,
+        image_block_request_timeout: 150000,
+        image_block_response_delay: 250,
+        default_maximum_data_size: 50,
     },
     device_options: {},
     advanced: {
-        legacy_api: true,
-        legacy_availability_payload: true,
         log_rotation: true,
+        log_console_json: false,
         log_symlink_current: false,
-        log_output: ['console', 'file'],
-        log_directory: path.join(data.getPath(), 'log', '%TIMESTAMP%'),
-        log_file: 'log.log',
-        log_level: /* istanbul ignore next */ process.env.DEBUG ? 'debug' : 'info',
+        log_output: ["console", "file"],
+        log_directory: path.join(data.getPath(), "log", "%TIMESTAMP%"),
+        log_file: "log.log",
+        log_level: /* v8 ignore next */ process.env.DEBUG ? "debug" : "info",
         log_namespaced_levels: {},
         log_syslog: {},
         log_debug_to_mqtt_frontend: false,
-        log_debug_namespace_ignore: '',
+        log_debug_namespace_ignore: "",
+        log_directories_to_keep: 10,
         pan_id: 0x1a62,
         ext_pan_id: [0xdd, 0xdd, 0xdd, 0xdd, 0xdd, 0xdd, 0xdd, 0xdd],
         channel: 11,
-        adapter_concurrent: null,
-        adapter_delay: null,
+        adapter_concurrent: undefined,
+        adapter_delay: undefined,
         cache_state: true,
         cache_state_persistent: true,
         cache_state_send_on_startup: true,
-        last_seen: 'disable',
+        last_seen: "disable",
         elapsed: false,
         network_key: [1, 3, 5, 7, 9, 11, 13, 15, 0, 2, 4, 6, 8, 10, 12, 13],
-        timestamp_format: 'YYYY-MM-DD HH:mm:ss',
-        output: 'json',
-        // Everything below is deprecated
-        availability_blocklist: [],
-        availability_passlist: [],
-        availability_blacklist: [],
-        availability_whitelist: [],
-        soft_reset_timeout: 0,
-        report: false,
+        timestamp_format: "YYYY-MM-DD HH:mm:ss",
+        output: "json",
+        enable_external_js: true,
     },
-};
+    health: {
+        interval: 10,
+        reset_on_check: false,
+    },
+} satisfies RecursivePartial<Settings>;
 
-let _settings: Partial<Settings>;
-let _settingsWithDefaults: Settings;
+let _settings: Partial<Settings> | undefined;
+let _settingsWithDefaults: Settings | undefined;
 
 function loadSettingsWithDefaults(): void {
-    _settingsWithDefaults = objectAssignDeep({}, defaults, getInternalSettings()) as Settings;
+    if (!_settings) {
+        _settings = read();
+    }
+
+    _settingsWithDefaults = objectAssignDeep({}, defaults, getPersistedSettings()) as Settings;
 
     if (!_settingsWithDefaults.devices) {
         _settingsWithDefaults.devices = {};
@@ -129,82 +138,6 @@ function loadSettingsWithDefaults(): void {
     if (!_settingsWithDefaults.groups) {
         _settingsWithDefaults.groups = {};
     }
-
-    if (_settingsWithDefaults.homeassistant) {
-        const defaults = {discovery_topic: 'homeassistant', status_topic: 'hass/status', legacy_entity_attributes: true, legacy_triggers: true};
-        const sLegacy = {};
-        if (_settingsWithDefaults.advanced) {
-            for (const key of [
-                'homeassistant_legacy_triggers',
-                'homeassistant_discovery_topic',
-                'homeassistant_legacy_entity_attributes',
-                'homeassistant_status_topic',
-            ]) {
-                // @ts-ignore
-                if (_settingsWithDefaults.advanced[key] !== undefined) {
-                    // @ts-ignore
-                    sLegacy[key.replace('homeassistant_', '')] = _settingsWithDefaults.advanced[key];
-                }
-            }
-        }
-
-        const s = typeof _settingsWithDefaults.homeassistant === 'object' ? _settingsWithDefaults.homeassistant : {};
-        // @ts-ignore
-        _settingsWithDefaults.homeassistant = {};
-        objectAssignDeep(_settingsWithDefaults.homeassistant, defaults, sLegacy, s);
-    }
-
-    if (_settingsWithDefaults.availability || _settingsWithDefaults.advanced?.availability_timeout) {
-        const defaults = {};
-        const s = typeof _settingsWithDefaults.availability === 'object' ? _settingsWithDefaults.availability : {};
-        // @ts-ignore
-        _settingsWithDefaults.availability = {};
-        objectAssignDeep(_settingsWithDefaults.availability, defaults, s);
-    }
-
-    if (_settingsWithDefaults.frontend) {
-        const defaults = {port: 8080, auth_token: false};
-        const s = typeof _settingsWithDefaults.frontend === 'object' ? _settingsWithDefaults.frontend : {};
-        // @ts-ignore
-        _settingsWithDefaults.frontend = {};
-        objectAssignDeep(_settingsWithDefaults.frontend, defaults, s);
-    }
-
-    if (_settings.advanced?.hasOwnProperty('baudrate') && _settings.serial?.baudrate == null) {
-        // @ts-ignore
-        _settingsWithDefaults.serial.baudrate = _settings.advanced.baudrate;
-    }
-
-    if (_settings.advanced?.hasOwnProperty('rtscts') && _settings.serial?.rtscts == null) {
-        // @ts-ignore
-        _settingsWithDefaults.serial.rtscts = _settings.advanced.rtscts;
-    }
-
-    if (_settings.advanced?.hasOwnProperty('ikea_ota_use_test_url') && _settings.ota?.ikea_ota_use_test_url == null) {
-        // @ts-ignore
-        _settingsWithDefaults.ota.ikea_ota_use_test_url = _settings.advanced.ikea_ota_use_test_url;
-    }
-
-    // @ts-ignore
-    if (_settings.experimental?.hasOwnProperty('transmit_power') && _settings.advanced?.transmit_power == null) {
-        // @ts-ignore
-        _settingsWithDefaults.advanced.transmit_power = _settings.experimental.transmit_power;
-    }
-
-    // @ts-ignore
-    if (_settings.experimental?.hasOwnProperty('output') && _settings.advanced?.output == null) {
-        // @ts-ignore
-        _settingsWithDefaults.advanced.output = _settings.experimental.output;
-    }
-
-    if (_settings.advanced?.log_level === 'warn') {
-        _settingsWithDefaults.advanced.log_level = 'warning';
-    }
-
-    // @ts-ignore
-    _settingsWithDefaults.ban && _settingsWithDefaults.blocklist.push(..._settingsWithDefaults.ban);
-    // @ts-ignore
-    _settingsWithDefaults.whitelist && _settingsWithDefaults.passlist.push(..._settingsWithDefaults.whitelist);
 }
 
 function parseValueRef(text: string): {filename: string; key: string} | null {
@@ -212,53 +145,105 @@ function parseValueRef(text: string): {filename: string; key: string} | null {
     if (match) {
         let filename = match[1];
         // This is mainly for backward compatibility.
-        if (!filename.endsWith('.yaml') && !filename.endsWith('.yml')) {
-            filename += '.yaml';
+        if (!filename.endsWith(".yaml") && !filename.endsWith(".yml")) {
+            filename += ".yaml";
         }
         return {filename, key: match[2]};
-    } else {
-        return null;
+    }
+
+    return null;
+}
+
+export function writeMinimalDefaults(): void {
+    const minimal = {
+        version: CURRENT_VERSION,
+        mqtt: {
+            base_topic: defaults.mqtt.base_topic,
+            server: "mqtt://localhost:1883",
+        },
+        serial: {},
+        advanced: {
+            log_level: defaults.advanced.log_level,
+            channel: defaults.advanced.channel,
+            network_key: "GENERATE",
+            pan_id: "GENERATE",
+            ext_pan_id: "GENERATE",
+            enable_external_js: false,
+        },
+        frontend: {
+            enabled: defaults.frontend.enabled,
+            port: defaults.frontend.port,
+        },
+        homeassistant: {
+            enabled: defaults.homeassistant.enabled,
+        },
+    } as Partial<Settings>;
+
+    applyEnvironmentVariables(minimal);
+    yaml.writeIfChanged(CONFIG_FILE_PATH, minimal);
+
+    _settings = read();
+
+    loadSettingsWithDefaults();
+}
+
+export function setOnboarding(value: boolean): void {
+    const settings = getPersistedSettings();
+
+    if (value) {
+        if (!settings.onboarding) {
+            settings.onboarding = value;
+
+            write();
+        }
+    } else if (settings.onboarding) {
+        delete settings.onboarding;
+
+        write();
     }
 }
 
-function write(): void {
-    const settings = getInternalSettings();
+export function write(): void {
+    const settings = getPersistedSettings();
     const toWrite: KeyValue = objectAssignDeep({}, settings);
 
     // Read settings to check if we have to split devices/groups into separate file.
-    const actual = yaml.read(file);
+    const actual = yaml.read(CONFIG_FILE_PATH);
 
     // In case the setting is defined in a separate file (e.g. !secret network_key) update it there.
-    for (const path of [
-        ['mqtt', 'server'],
-        ['mqtt', 'user'],
-        ['mqtt', 'password'],
-        ['advanced', 'network_key'],
-        ['frontend', 'auth_token'],
+    for (const [ns, key] of [
+        ["mqtt", "server"],
+        ["mqtt", "user"],
+        ["mqtt", "password"],
+        ["advanced", "network_key"],
+        ["frontend", "auth_token"],
     ]) {
-        if (actual[path[0]] && actual[path[0]][path[1]]) {
-            const ref = parseValueRef(actual[path[0]][path[1]]);
+        if (actual[ns]?.[key]) {
+            const ref = parseValueRef(actual[ns][key]);
             if (ref) {
-                yaml.updateIfChanged(data.joinPath(ref.filename), ref.key, toWrite[path[0]][path[1]]);
-                toWrite[path[0]][path[1]] = actual[path[0]][path[1]];
+                yaml.updateIfChanged(data.joinPath(ref.filename), ref.key, toWrite[ns][key]);
+                toWrite[ns][key] = actual[ns][key];
             }
         }
     }
 
     // Write devices/groups to separate file if required.
-    const writeDevicesOrGroups = (type: 'devices' | 'groups'): void => {
-        if (typeof actual[type] === 'string' || (Array.isArray(actual[type]) && actual[type].length > 0)) {
+    const writeDevicesOrGroups = (type: "devices" | "groups"): void => {
+        if (typeof actual[type] === "string" || (Array.isArray(actual[type]) && actual[type].length > 0)) {
             const fileToWrite = Array.isArray(actual[type]) ? actual[type][0] : actual[type];
-            const content = objectAssignDeep({}, settings[type]);
+            // `readDevicesOrGroups()` already set this to an object whenever the config points at separate files, but the
+            // persisted settings are `Partial`, so the fallback is only here to satisfy the type
+            /* v8 ignore next */
+            const content = objectAssignDeep({}, settings[type] ?? {});
 
             // If an array, only write to first file and only devices which are not in the other files.
             if (Array.isArray(actual[type])) {
-                actual[type]
-                    .filter((f: string, i: number) => i !== 0)
-                    .map((f: string) => yaml.readIfExists(data.joinPath(f), {}))
-                    .map((c: KeyValue) => Object.keys(c))
-                    // @ts-ignore
-                    .forEach((k: string) => delete content[k]);
+                // skip i==0
+                for (let i = 1; i < actual[type].length; i++) {
+                    for (const key in yaml.readIfExists(data.joinPath(actual[type][i]))) {
+                        delete content[key];
+                    }
+                }
             }
 
             yaml.writeIfChanged(data.joinPath(fileToWrite), content);
@@ -266,55 +251,37 @@ function write(): void {
         }
     };
 
-    writeDevicesOrGroups('devices');
-    writeDevicesOrGroups('groups');
+    writeDevicesOrGroups("devices");
+    writeDevicesOrGroups("groups");
 
-    yaml.writeIfChanged(file, toWrite);
+    applyEnvironmentVariables(toWrite);
+
+    yaml.writeIfChanged(CONFIG_FILE_PATH, toWrite);
 
     _settings = read();
+
     loadSettingsWithDefaults();
 }
 
 export function validate(): string[] {
-    try {
-        getInternalSettings();
-    } catch (error) {
-        if (error.name === 'YAMLException') {
-            return [`Your YAML file: '${error.file}' is invalid (use https://jsonformatter.org/yaml-validator to find and fix the issue)`];
-        }
-
-        return [error.message];
-    }
+    getPersistedSettings();
 
     if (!ajvSetting(_settings)) {
-        return ajvSetting.errors.map((v) => `${v.instancePath.substring(1)} ${v.message}`);
+        // biome-ignore lint/style/noNonNullAssertion: When `ajvSetting()` return false it always has `errors`
+        return ajvSetting.errors!.map((v) => `${v.instancePath.substring(1)} ${v.message}`);
     }
 
     const errors = [];
-    if (
-        _settings.advanced &&
-        _settings.advanced.network_key &&
-        typeof _settings.advanced.network_key === 'string' &&
-        _settings.advanced.network_key !== 'GENERATE'
-    ) {
+
+    if (_settings.advanced?.network_key && typeof _settings.advanced.network_key === "string" && _settings.advanced.network_key !== "GENERATE") {
         errors.push(`advanced.network_key: should be array or 'GENERATE' (is '${_settings.advanced.network_key}')`);
     }
 
-    if (
-        _settings.advanced &&
-        _settings.advanced.pan_id &&
-        typeof _settings.advanced.pan_id === 'string' &&
-        _settings.advanced.pan_id !== 'GENERATE'
-    ) {
+    if (_settings.advanced?.pan_id && typeof _settings.advanced.pan_id === "string" && _settings.advanced.pan_id !== "GENERATE") {
         errors.push(`advanced.pan_id: should be number or 'GENERATE' (is '${_settings.advanced.pan_id}')`);
     }
 
-    if (
-        _settings.advanced &&
-        _settings.advanced.ext_pan_id &&
-        typeof _settings.advanced.ext_pan_id === 'string' &&
-        _settings.advanced.ext_pan_id !== 'GENERATE'
-    ) {
+    if (_settings.advanced?.ext_pan_id && typeof _settings.advanced.ext_pan_id === "string" && _settings.advanced.ext_pan_id !== "GENERATE") {
         errors.push(`advanced.ext_pan_id: should be array or 'GENERATE' (is '${_settings.advanced.ext_pan_id}')`);
     }
 
@@ -324,52 +291,57 @@ export function validate(): string[] {
         if (names.includes(e.friendly_name)) errors.push(`Duplicate friendly_name '${e.friendly_name}' found`);
         errors.push(...utils.validateFriendlyName(e.friendly_name));
         names.push(e.friendly_name);
-        if (e.qos != null && ![0, 1, 2].includes(e.qos)) {
-            errors.push(`QOS for '${e.friendly_name}' not valid, should be 0, 1 or 2 got ${e.qos}`);
+        if ("icon" in e && e.icon && !e.icon.startsWith("http://") && !e.icon.startsWith("https://") && !e.icon.startsWith("device_icons/")) {
+            errors.push(`Device icon of '${e.friendly_name}' should start with 'device_icons/', got '${e.icon}'`);
         }
     };
 
     const settingsWithDefaults = get();
-    Object.values(settingsWithDefaults.devices).forEach((d) => check(d));
-    Object.values(settingsWithDefaults.groups).forEach((g) => check(g));
+
+    for (const key in settingsWithDefaults.devices) {
+        check(settingsWithDefaults.devices[key]);
+    }
+
+    for (const key in settingsWithDefaults.groups) {
+        check(settingsWithDefaults.groups[key]);
+    }
 
     if (settingsWithDefaults.mqtt.version !== 5) {
         for (const device of Object.values(settingsWithDefaults.devices)) {
             if (device.retention) {
-                errors.push('MQTT retention requires protocol version 5');
+                errors.push("MQTT retention requires protocol version 5");
             }
         }
     }
 
-    const checkAvailabilityList = (list: string[], type: string): void => {
-        list.forEach((e) => {
-            if (!getDevice(e)) {
-                errors.push(`Non-existing entity '${e}' specified in '${type}'`);
-            }
-        });
-    };
-
-    checkAvailabilityList(settingsWithDefaults.advanced.availability_blacklist, 'availability_blacklist');
-    checkAvailabilityList(settingsWithDefaults.advanced.availability_whitelist, 'availability_whitelist');
-    checkAvailabilityList(settingsWithDefaults.advanced.availability_blocklist, 'availability_blocklist');
-    checkAvailabilityList(settingsWithDefaults.advanced.availability_passlist, 'availability_passlist');
-
     return errors;
 }
 
-function read(): Settings {
-    const s = yaml.read(file) as Settings;
-    applyEnvironmentVariables(s);
+export function validateNonRequired(): string[] {
+    getPersistedSettings();
+
+    if (!ajvSetting(_settings)) {
+        // biome-ignore lint/style/noNonNullAssertion: When `ajvSetting()` return false it always has `errors`
+        const errors = ajvSetting.errors!.filter((e) => e.keyword !== "required");
+
+        return errors.map((v) => `${v.instancePath.substring(1)} ${v.message}`);
+    }
+
+    return [];
+}
+
+function read(): Partial<Settings> {
+    const s = yaml.read(CONFIG_FILE_PATH) as Partial<Settings>;
 
     // Read !secret MQTT username and password if set
-    // eslint-disable-next-line
-    const interpretValue = (value: any): any => {
-        const ref = parseValueRef(value);
-        if (ref) {
-            return yaml.read(data.joinPath(ref.filename))[ref.key];
-        } else {
-            return value;
+    const interpretValue = <T>(value: T): T => {
+        if (typeof value === "string") {
+            const ref = parseValueRef(value);
+            if (ref) {
+                return yaml.read(data.joinPath(ref.filename))[ref.key];
+            }
         }
+        return value;
     };
 
     if (s.mqtt?.user) {
@@ -393,75 +365,85 @@ function read(): Settings {
     }
 
     // Read devices/groups configuration from separate file if specified.
-    const readDevicesOrGroups = (type: 'devices' | 'groups'): void => {
-        if (typeof s[type] === 'string' || (Array.isArray(s[type]) && Array(s[type]).length > 0)) {
-            /* eslint-disable-line */ // @ts-ignore
+    const readDevicesOrGroups = (type: "devices" | "groups"): void => {
+        if (typeof s[type] === "string" || (Array.isArray(s[type]) && Array(s[type]).length > 0)) {
             const files: string[] = Array.isArray(s[type]) ? s[type] : [s[type]];
             s[type] = {};
             for (const file of files) {
-                const content = yaml.readIfExists(data.joinPath(file), {});
-                /* eslint-disable-line */ // @ts-ignore
-                s[type] = objectAssignDeep.noMutate(s[type], content);
+                const content = yaml.readIfExists(data.joinPath(file));
+                s[type] = objectAssignDeep({}, s[type], content);
             }
         }
     };
 
-    readDevicesOrGroups('devices');
-    readDevicesOrGroups('groups');
+    readDevicesOrGroups("devices");
+    readDevicesOrGroups("groups");
 
     return s;
 }
 
 function applyEnvironmentVariables(settings: Partial<Settings>): void {
     const iterate = (obj: KeyValue, path: string[]): void => {
-        Object.keys(obj).forEach((key) => {
-            if (key !== 'type') {
-                if (key !== 'properties' && obj[key]) {
-                    const type = (obj[key].type || 'object').toString();
-                    const envPart = path.reduce((acc, val) => `${acc}${val}_`, '');
+        for (const key in obj) {
+            if (key !== "type") {
+                if (key !== "properties" && obj[key]) {
+                    const type = (obj[key].type || "object").toString();
+                    const envPart = path.reduce((acc, val) => `${acc}${val}_`, "");
                     const envVariableName = `ZIGBEE2MQTT_CONFIG_${envPart}${key}`.toUpperCase();
-                    if (process.env[envVariableName]) {
+                    const envVariable = process.env[envVariableName];
+
+                    if (envVariable) {
                         const setting = path.reduce((acc, val) => {
-                            /* eslint-disable-line */ // @ts-ignore
+                            // @ts-expect-error ignore typing
                             acc[val] = acc[val] || {};
-                            /* eslint-disable-line */ // @ts-ignore
+                            // @ts-expect-error ignore typing
                             return acc[val];
                         }, settings);
 
-                        if (type.indexOf('object') >= 0 || type.indexOf('array') >= 0) {
+                        if (type.indexOf("object") >= 0 || type.indexOf("array") >= 0) {
                             try {
-                                setting[key] = JSON.parse(process.env[envVariableName]);
-                            } catch (error) {
-                                setting[key] = process.env[envVariableName];
+                                setting[key as keyof Settings] = JSON.parse(envVariable);
+                            } catch {
+                                // biome-ignore lint/suspicious/noExplicitAny: auto-parsing
+                                setting[key as keyof Settings] = envVariable as any;
                             }
-                        } else if (type.indexOf('number') >= 0) {
-                            /* eslint-disable-line */ // @ts-ignore
-                            setting[key] = process.env[envVariableName] * 1;
-                        } else if (type.indexOf('boolean') >= 0) {
-                            setting[key] = process.env[envVariableName].toLowerCase() === 'true';
+                        } else if (type.indexOf("number") >= 0) {
+                            // biome-ignore lint/suspicious/noExplicitAny: auto-parsing
+                            setting[key as keyof Settings] = ((envVariable as unknown as number) * 1) as any;
+                        } else if (type.indexOf("boolean") >= 0) {
+                            // biome-ignore lint/suspicious/noExplicitAny: auto-parsing
+                            setting[key as keyof Settings] = (envVariable.toLowerCase() === "true") as any;
                         } else {
-                            /* istanbul ignore else */
-                            if (type.indexOf('string') >= 0) {
-                                setting[key] = process.env[envVariableName];
+                            if (type.indexOf("string") >= 0) {
+                                // biome-ignore lint/suspicious/noExplicitAny: auto-parsing
+                                setting[key as keyof Settings] = envVariable as any;
                             }
                         }
                     }
                 }
 
-                if (typeof obj[key] === 'object' && obj[key]) {
+                if (typeof obj[key] === "object" && obj[key]) {
                     const newPath = [...path];
-                    if (key !== 'properties' && key !== 'oneOf' && !Number.isInteger(Number(key))) {
+
+                    if (key !== "properties" && key !== "oneOf" && !Number.isInteger(Number(key))) {
                         newPath.push(key);
                     }
+
                     iterate(obj[key], newPath);
                 }
             }
-        });
+        }
     };
+
     iterate(schemaJson.properties, []);
 }
 
-function getInternalSettings(): Partial<Settings> {
+/**
+ * Get the settings actually written in the yaml.
+ * Env vars are applied on top.
+ * Defaults merged on startup are not included.
+ */
+export function getPersistedSettings(): Partial<Settings> {
     if (!_settings) {
         _settings = read();
     }
@@ -474,12 +456,13 @@ export function get(): Settings {
         loadSettingsWithDefaults();
     }
 
-    return _settingsWithDefaults;
+    // biome-ignore lint/style/noNonNullAssertion: just loaded
+    return _settingsWithDefaults!;
 }
 
 export function set(path: string[], value: string | number | boolean | KeyValue): void {
-    /* eslint-disable-next-line */
-    let settings: any = getInternalSettings();
+    // biome-ignore lint/suspicious/noExplicitAny: auto-parsing
+    let settings: any = getPersistedSettings();
 
     for (let i = 0; i < path.length; i++) {
         const key = path[i];
@@ -497,51 +480,51 @@ export function set(path: string[], value: string | number | boolean | KeyValue)
     write();
 }
 
-export function apply(settings: Record<string, unknown>): boolean {
-    getInternalSettings(); // Ensure _settings is initialized.
-    /* eslint-disable-line */ // @ts-ignore
-    const newSettings = objectAssignDeep.noMutate(_settings, settings);
+export function apply(settings: Record<string, unknown>, throwOnError = true): boolean {
+    const newSettings = objectAssignDeep({}, getPersistedSettings(), settings);
+
     utils.removeNullPropertiesFromObject(newSettings, NULLABLE_SETTINGS);
-    ajvSetting(newSettings);
-    const errors = ajvSetting.errors && ajvSetting.errors.filter((e) => e.keyword !== 'required');
-    if (errors?.length) {
-        const error = errors[0];
-        throw new Error(`${error.instancePath.substring(1)} ${error.message}`);
+
+    if (!ajvSetting(newSettings) && throwOnError) {
+        // biome-ignore lint/style/noNonNullAssertion: When `ajvSetting()` return false it always has `errors`
+        const errors = ajvSetting.errors!.filter((e) => e.keyword !== "required");
+
+        if (errors.length) {
+            const error = errors[0];
+            throw new Error(`${error.instancePath.substring(1)} ${error.message}`);
+        }
     }
 
     _settings = newSettings;
     write();
 
     ajvRestartRequired(settings);
-    const restartRequired = ajvRestartRequired.errors && !!ajvRestartRequired.errors.find((e) => e.keyword === 'requiresRestart');
+
+    const restartRequired = Boolean(ajvRestartRequired.errors && !!ajvRestartRequired.errors.find((e) => e.keyword === "requiresRestart"));
+
     return restartRequired;
 }
 
-export function getGroup(IDorName: string | number): GroupOptions {
+export function getGroup(IDorName: string | number): GroupOptions | undefined {
     const settings = get();
     const byID = settings.groups[IDorName];
+
     if (byID) {
-        return {devices: [], ...byID, ID: Number(IDorName)};
+        return {...byID, ID: Number(IDorName)};
     }
 
     for (const [ID, group] of Object.entries(settings.groups)) {
         if (group.friendly_name === IDorName) {
-            return {devices: [], ...group, ID: Number(ID)};
+            return {...group, ID: Number(ID)};
         }
     }
 
-    return null;
-}
-
-export function getGroups(): GroupOptions[] {
-    const settings = get();
-    return Object.entries(settings.groups).map(([ID, group]) => {
-        return {devices: [], ...group, ID: Number(ID)};
-    });
+    return undefined;
 }
 
 function getGroupThrowIfNotExists(IDorName: string): GroupOptions {
     const group = getGroup(IDorName);
+
     if (!group) {
         throw new Error(`Group '${IDorName}' does not exist`);
     }
@@ -549,9 +532,10 @@ function getGroupThrowIfNotExists(IDorName: string): GroupOptions {
     return group;
 }
 
-export function getDevice(IDorName: string): DeviceOptions {
+export function getDevice(IDorName: string): DeviceOptionsWithId | undefined {
     const settings = get();
     const byID = settings.devices[IDorName];
+
     if (byID) {
         return {...byID, ID: IDorName};
     }
@@ -562,10 +546,10 @@ export function getDevice(IDorName: string): DeviceOptions {
         }
     }
 
-    return null;
+    return undefined;
 }
 
-function getDeviceThrowIfNotExists(IDorName: string): DeviceOptions {
+function getDeviceThrowIfNotExists(IDorName: string): DeviceOptionsWithId {
     const device = getDevice(IDorName);
     if (!device) {
         throw new Error(`Device '${IDorName}' does not exist`);
@@ -574,155 +558,117 @@ function getDeviceThrowIfNotExists(IDorName: string): DeviceOptions {
     return device;
 }
 
-export function addDevice(ID: string): DeviceOptions {
-    if (getDevice(ID)) {
-        throw new Error(`Device '${ID}' already exists`);
+export function addDevice(id: string): DeviceOptionsWithId {
+    if (getDevice(id)) {
+        throw new Error(`Device '${id}' already exists`);
     }
 
-    const settings = getInternalSettings();
+    const settings = getPersistedSettings();
 
     if (!settings.devices) {
         settings.devices = {};
     }
 
-    settings.devices[ID] = {friendly_name: ID};
+    settings.devices[id] = {friendly_name: id};
     write();
-    return getDevice(ID);
+
+    // biome-ignore lint/style/noNonNullAssertion: valid from creation above
+    return getDevice(id)!;
 }
 
-export function addDeviceToPasslist(ID: string): void {
-    const settings = getInternalSettings();
-    if (!settings.passlist) {
-        settings.passlist = [];
-    }
-
-    if (settings.passlist.includes(ID)) {
-        throw new Error(`Device '${ID}' already in passlist`);
-    }
-
-    settings.passlist.push(ID);
-    write();
-}
-
-export function blockDevice(ID: string): void {
-    const settings = getInternalSettings();
+export function blockDevice(id: string): void {
+    const settings = getPersistedSettings();
     if (!settings.blocklist) {
         settings.blocklist = [];
     }
 
-    settings.blocklist.push(ID);
+    settings.blocklist.push(id);
     write();
 }
 
 export function removeDevice(IDorName: string): void {
     const device = getDeviceThrowIfNotExists(IDorName);
-    const settings = getInternalSettings();
-    delete settings.devices[device.ID];
-
-    // Remove device from groups
-    if (settings.groups) {
-        const regex = new RegExp(`^(${device.friendly_name}|${device.ID})(/[^/]+)?$`);
-        for (const group of Object.values(settings.groups).filter((g) => g.devices)) {
-            group.devices = group.devices.filter((device) => !device.match(regex));
-        }
-    }
-
+    const settings = getPersistedSettings();
+    delete settings.devices?.[device.ID];
     write();
 }
 
-export function addGroup(name: string, ID?: string): GroupOptions {
+export function addGroup(name: string, id?: string): GroupOptions {
     utils.validateFriendlyName(name, true);
+
     if (getGroup(name) || getDevice(name)) {
         throw new Error(`friendly_name '${name}' is already in use`);
     }
 
-    const settings = getInternalSettings();
+    const settings = getPersistedSettings();
     if (!settings.groups) {
         settings.groups = {};
     }
 
-    if (ID == null) {
+    if (id == null || (typeof id === "string" && id.trim() === "")) {
         // look for free ID
-        ID = '1';
-        while (settings.groups.hasOwnProperty(ID)) {
-            ID = (Number.parseInt(ID) + 1).toString();
+        id = "1";
+
+        while (settings.groups[id]) {
+            id = (Number.parseInt(id, 10) + 1).toString();
         }
     } else {
         // ensure provided ID is not in use
-        ID = ID.toString();
-        if (settings.groups.hasOwnProperty(ID)) {
-            throw new Error(`Group ID '${ID}' is already in use`);
+        id = id.toString();
+
+        if (settings.groups[id]) {
+            throw new Error(`Group ID '${id}' is already in use`);
         }
     }
 
-    settings.groups[ID] = {friendly_name: name};
+    settings.groups[id] = {friendly_name: name};
     write();
 
-    return getGroup(ID);
-}
-
-function groupGetDevice(group: {devices?: string[]}, keys: string[]): string {
-    for (const device of group.devices ?? []) {
-        if (keys.includes(device)) return device;
-    }
-
-    return null;
-}
-
-export function addDeviceToGroup(IDorName: string, keys: string[]): void {
-    const groupID = getGroupThrowIfNotExists(IDorName).ID;
-    const settings = getInternalSettings();
-
-    const group = settings.groups[groupID];
-    if (!groupGetDevice(group, keys)) {
-        if (!group.devices) group.devices = [];
-        group.devices.push(keys[0]);
-        write();
-    }
-}
-
-export function removeDeviceFromGroup(IDorName: string, keys: string[]): void {
-    const groupID = getGroupThrowIfNotExists(IDorName).ID;
-    const settings = getInternalSettings();
-    const group = settings.groups[groupID];
-    if (!group.devices) {
-        return;
-    }
-
-    const key = groupGetDevice(group, keys);
-    if (key) {
-        group.devices = group.devices.filter((d) => d != key);
-        write();
-    }
+    // biome-ignore lint/style/noNonNullAssertion: valid from creation above
+    return getGroup(id)!;
 }
 
 export function removeGroup(IDorName: string | number): void {
     const groupID = getGroupThrowIfNotExists(IDorName.toString()).ID;
-    const settings = getInternalSettings();
-    delete settings.groups[groupID];
+    const settings = getPersistedSettings();
+
+    // biome-ignore lint/style/noNonNullAssertion: throwing above if not valid
+    delete settings.groups![groupID];
     write();
 }
 
 export function changeEntityOptions(IDorName: string, newOptions: KeyValue): boolean {
-    const settings = getInternalSettings();
+    const settings = getPersistedSettings();
     delete newOptions.friendly_name;
     delete newOptions.devices;
     let validator: ValidateFunction;
-    if (getDevice(IDorName)) {
-        objectAssignDeep(settings.devices[getDevice(IDorName).ID], newOptions);
-        utils.removeNullPropertiesFromObject(settings.devices[getDevice(IDorName).ID], NULLABLE_SETTINGS);
+    const device = getDevice(IDorName);
+
+    if (device) {
+        // biome-ignore lint/style/noNonNullAssertion: valid from above
+        const settingsDevice = settings.devices![device.ID];
+        objectAssignDeep(settingsDevice, newOptions);
+        utils.removeNullPropertiesFromObject(settingsDevice, NULLABLE_SETTINGS);
         validator = ajvRestartRequiredDeviceOptions;
-    } else if (getGroup(IDorName)) {
-        objectAssignDeep(settings.groups[getGroup(IDorName).ID], newOptions);
-        utils.removeNullPropertiesFromObject(settings.groups[getGroup(IDorName).ID], NULLABLE_SETTINGS);
-        validator = ajvRestartRequiredGroupOptions;
     } else {
-        throw new Error(`Device or group '${IDorName}' does not exist`);
+        const group = getGroup(IDorName);
+
+        if (group) {
+            // biome-ignore lint/style/noNonNullAssertion: valid from above
+            const settingsGroup = settings.groups![group.ID];
+            objectAssignDeep(settingsGroup, newOptions);
+            utils.removeNullPropertiesFromObject(settingsGroup, NULLABLE_SETTINGS);
+            validator = ajvRestartRequiredGroupOptions;
+        } else {
+            throw new Error(`Device or group '${IDorName}' does not exist`);
+        }
     }
 
     write();
     validator(newOptions);
-    const restartRequired = validator.errors && !!validator.errors.find((e) => e.keyword === 'requiresRestart');
+
+    const restartRequired = Boolean(validator.errors && !!validator.errors.find((e) => e.keyword === "requiresRestart"));
+
     return restartRequired;
 }
 
@@ -732,30 +678,39 @@ export function changeFriendlyName(IDorName: string, newName: string): void {
         throw new Error(`friendly_name '${newName}' is already in use`);
     }
 
-    const settings = getInternalSettings();
-    if (getDevice(IDorName)) {
-        settings.devices[getDevice(IDorName).ID].friendly_name = newName;
-    } else if (getGroup(IDorName)) {
-        settings.groups[getGroup(IDorName).ID].friendly_name = newName;
+    const settings = getPersistedSettings();
+    const device = getDevice(IDorName);
+
+    if (device) {
+        // biome-ignore lint/style/noNonNullAssertion: valid from above
+        settings.devices![device.ID].friendly_name = newName;
     } else {
-        throw new Error(`Device or group '${IDorName}' does not exist`);
+        const group = getGroup(IDorName);
+
+        if (group) {
+            // biome-ignore lint/style/noNonNullAssertion: valid from above
+            settings.groups![group.ID].friendly_name = newName;
+        } else {
+            throw new Error(`Device or group '${IDorName}' does not exist`);
+        }
     }
 
     write();
 }
 
 export function reRead(): void {
-    _settings = null;
-    getInternalSettings();
-    _settingsWithDefaults = null;
+    _settings = undefined;
+    getPersistedSettings();
+    _settingsWithDefaults = undefined;
     get();
 }
 
 export const testing = {
     write,
     clear: (): void => {
-        _settings = null;
-        _settingsWithDefaults = null;
+        _settings = undefined;
+        _settingsWithDefaults = undefined;
     },
     defaults,
+    CURRENT_VERSION,
 };

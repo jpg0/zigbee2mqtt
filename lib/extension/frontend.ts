@@ -1,124 +1,166 @@
-import bind from 'bind-decorator';
-import gzipStatic, {RequestHandler} from 'connect-gzip-static';
-import finalhandler from 'finalhandler';
-import fs from 'fs';
-import http from 'http';
-import https from 'https';
-import stringify from 'json-stable-stringify-without-jsonify';
-import net from 'net';
-import url from 'url';
-import WebSocket from 'ws';
-import frontend from 'zigbee2mqtt-frontend';
-
-import logger from '../util/logger';
-import * as settings from '../util/settings';
-import utils from '../util/utils';
-import Extension from './extension';
+import assert from "node:assert";
+import {existsSync, readFileSync} from "node:fs";
+import type {IncomingMessage, Server, ServerResponse} from "node:http";
+import {createServer} from "node:http";
+import {createServer as createSecureServer} from "node:https";
+import type {Socket} from "node:net";
+import {posix} from "node:path";
+import bind from "bind-decorator";
+import WebSocket from "ws";
+import data from "../util/data";
+import logger from "../util/logger";
+import * as settings from "../util/settings";
+import {createStaticFileServer, sendNotFound} from "../util/staticFileServer";
+import {stringify} from "../util/stringify";
+import utils from "../util/utils";
+import Extension from "./extension";
 
 /**
  * This extension servers the frontend
  */
-export default class Frontend extends Extension {
-    private mqttBaseTopic = settings.get().mqtt.base_topic;
-    private host = settings.get().frontend.host;
-    private port = settings.get().frontend.port;
-    private sslCert = settings.get().frontend.ssl_cert;
-    private sslKey = settings.get().frontend.ssl_key;
-    private authToken = settings.get().frontend.auth_token;
-    private server: http.Server;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    private fileServer: RequestHandler;
-    private wss: WebSocket.Server = null;
+export class Frontend extends Extension {
+    private mqttBaseTopic: string;
+    private server: Server | undefined;
+    private wss!: WebSocket.Server;
+    private baseUrl: string;
 
-    private isHttpsConfigured(): boolean {
-        if (this.sslCert && this.sslKey) {
-            if (!fs.existsSync(this.sslCert) || !fs.existsSync(this.sslKey)) {
-                logger.error(`defined ssl_cert '${this.sslCert}' or ssl_key '${this.sslKey}' file path does not exists, server won't be secured.`);
-                return false;
-            }
-            return true;
-        }
-        return false;
+    constructor(
+        zigbee: Zigbee,
+        mqtt: Mqtt,
+        state: State,
+        publishEntityState: PublishEntityState,
+        eventBus: EventBus,
+        enableDisableExtension: (enable: boolean, name: string) => Promise<void>,
+        restartCallback: () => Promise<void>,
+        addExtension: (extension: Extension) => Promise<void>,
+    ) {
+        super(zigbee, mqtt, state, publishEntityState, eventBus, enableDisableExtension, restartCallback, addExtension);
+
+        const frontendSettings = settings.get().frontend;
+        assert(frontendSettings.enabled, `Frontend extension created with setting 'enabled: false'`);
+        this.baseUrl = frontendSettings.base_url;
+        this.mqttBaseTopic = settings.get().mqtt.base_topic;
     }
 
     override async start(): Promise<void> {
-        if (this.isHttpsConfigured()) {
-            const serverOptions = {
-                key: fs.readFileSync(this.sslKey),
-                cert: fs.readFileSync(this.sslCert),
-            };
-            this.server = https.createServer(serverOptions, this.onRequest);
+        if (settings.get().frontend.disable_ui_serving) {
+            const {host, port} = settings.get().frontend;
+            this.wss = new WebSocket.Server({port, host, path: posix.join(this.baseUrl, "api")});
+
+            logger.info(
+                /* v8 ignore next */
+                `Frontend UI serving is disabled. WebSocket at: ${this.wss.options.host ?? "0.0.0.0"}:${this.wss.options.port}${this.wss.options.path}`,
+            );
         } else {
-            this.server = http.createServer(this.onRequest);
-        }
+            const {host, port, ssl_key: sslKey, ssl_cert: sslCert} = settings.get().frontend;
+            const hasSSL = (val: string | undefined, key: string): val is string => {
+                if (val) {
+                    if (existsSync(val)) {
+                        return true;
+                    }
 
-        this.server.on('upgrade', this.onUpgrade);
-
-        /* istanbul ignore next */
-        const options = {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            setHeaders: (res: any, path: string): void => {
-                if (path.endsWith('index.html')) {
-                    res.setHeader('Cache-Control', 'no-store');
+                    logger.error(`Defined ${key} '${val}' file path does not exists, server won't be secured.`);
                 }
-            },
-        };
-        this.fileServer = gzipStatic(frontend.getPath(), options);
-        this.wss = new WebSocket.Server({noServer: true});
-        this.wss.on('connection', this.onWebSocketConnection);
 
-        this.eventBus.onMQTTMessagePublished(this, this.onMQTTPublishMessage);
+                return false;
+            };
+            const frontend = (await import(settings.get().frontend.package)) as typeof import("zigbee2mqtt-frontend");
+            const logError = logger.error.bind(logger);
+            const fileServer = createStaticFileServer(frontend.default.getPath(), logError);
+            const deviceIconsFileServer = createStaticFileServer(data.joinPath("device_icons"), logError);
+            const onRequest = (request: IncomingMessage, response: ServerResponse): void => {
+                // biome-ignore lint/style/noNonNullAssertion: `Only valid for request obtained from Server`
+                const url = request.url!;
+                const newUrl = posix.relative(this.baseUrl, url);
 
-        if (!this.host) {
-            this.server.listen(this.port);
-            logger.info(`Started frontend on port ${this.port}`);
-        } else if (this.host.startsWith('/')) {
-            this.server.listen(this.host);
-            logger.info(`Started frontend on socket ${this.host}`);
-        } else {
-            this.server.listen(this.port, this.host);
-            logger.info(`Started frontend on port ${this.host}:${this.port}`);
+                // The request url is not within the frontend base url, so the relative path starts with '..'
+                if (newUrl.startsWith(".")) {
+                    sendNotFound(request, response);
+
+                    return;
+                }
+
+                // The base url itself is a directory, redirect to its trailing slash form so the browser resolves the
+                // relative asset paths in `index.html` against the frontend root instead of against its parent.
+                if (newUrl === "" && !url.endsWith("/")) {
+                    response.writeHead(301, {Location: `${url}/`});
+                    response.end();
+
+                    return;
+                }
+
+                request.url = `/${newUrl}`;
+
+                if (newUrl.startsWith("device_icons/")) {
+                    request.url = request.url.replace("/device_icons", "");
+
+                    deviceIconsFileServer(request, response);
+                } else {
+                    fileServer(request, response);
+                }
+            };
+
+            if (hasSSL(sslKey, "ssl_key") && hasSSL(sslCert, "ssl_cert")) {
+                const serverOptions = {key: readFileSync(sslKey), cert: readFileSync(sslCert)};
+                this.server = createSecureServer(serverOptions, onRequest);
+            } else {
+                this.server = createServer(onRequest);
+            }
+
+            this.server.on("upgrade", this.onUpgrade);
+
+            if (!host) {
+                this.server.listen(port);
+                logger.info(`Started frontend on port ${port}`);
+            } else if (host.startsWith("/")) {
+                this.server.listen(host);
+                logger.info(`Started frontend on socket ${host}`);
+            } else {
+                this.server.listen(port, host);
+                logger.info(`Started frontend on port ${host}:${port}`);
+            }
+
+            this.wss = new WebSocket.Server({noServer: true, path: posix.join(this.baseUrl, "api")});
         }
+
+        this.wss.on("connection", this.onWebSocketConnection);
+
+        this.eventBus.onMQTTMessagePublished(this, this.onMQTTPublishMessageOrEntityState);
+        this.eventBus.onPublishEntityState(this, this.onMQTTPublishMessageOrEntityState);
     }
 
     override async stop(): Promise<void> {
         await super.stop();
-        this.wss?.clients.forEach((client) => {
-            client.send(stringify({topic: 'bridge/state', payload: 'offline'}));
-            client.terminate();
-        });
-        this.wss?.close();
-        /* istanbul ignore else */
-        if (this.server) {
-            return new Promise((cb: () => void) => this.server.close(cb));
+
+        if (this.wss) {
+            for (const client of this.wss.clients) {
+                client.send(stringify({topic: "bridge/state", payload: {state: "offline"}}));
+                client.terminate();
+            }
+
+            this.wss.close();
         }
+
+        await new Promise((resolve) => (this.server ? this.server.close(resolve) : resolve(undefined)));
     }
 
-    @bind private onRequest(request: http.IncomingMessage, response: http.ServerResponse): void {
-        // @ts-ignore
-        this.fileServer(request, response, finalhandler(request, response));
-    }
-
-    private authenticate(request: http.IncomingMessage, cb: (authenticate: boolean) => void): void {
-        const {query} = url.parse(request.url, true);
-        cb(!this.authToken || this.authToken === query.token);
-    }
-
-    @bind private onUpgrade(request: http.IncomingMessage, socket: net.Socket, head: Buffer): void {
+    @bind private onUpgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
         this.wss.handleUpgrade(request, socket, head, (ws) => {
-            this.authenticate(request, (isAuthenticated) => {
-                if (isAuthenticated) {
-                    this.wss.emit('connection', ws, request);
-                } else {
-                    ws.close(4401, 'Unauthorized');
-                }
-            });
+            // biome-ignore lint/style/noNonNullAssertion: `Only valid for request obtained from Server`
+            const {searchParams} = new URL(request.url!, "http://localhost"); // dummy base, may not be absolute
+            const authToken = settings.get().frontend.auth_token;
+
+            if (!authToken || authToken === searchParams.get("token")) {
+                this.wss.emit("connection", ws, request);
+            } else {
+                ws.close(4401, "Unauthorized");
+            }
         });
     }
 
     @bind private onWebSocketConnection(ws: WebSocket): void {
-        ws.on('error', (msg) => logger.error(`WebSocket error: ${msg.message}`));
-        ws.on('message', (data: Buffer, isBinary: boolean) => {
+        ws.on("error", (msg) => logger.error(`WebSocket error: ${msg.message}`));
+        ws.on("message", (data: Buffer, isBinary: boolean) => {
             if (!isBinary && data) {
                 const message = data.toString();
                 const {topic, payload} = JSON.parse(message);
@@ -127,7 +169,6 @@ export default class Frontend extends Extension {
         });
 
         for (const [topic, payload] of Object.entries(this.mqtt.retainedMessages)) {
-            /* istanbul ignore else */
             if (topic.startsWith(`${this.mqttBaseTopic}/`)) {
                 ws.send(
                     stringify({
@@ -139,12 +180,12 @@ export default class Frontend extends Extension {
             }
         }
 
-        for (const device of this.zigbee.devices(false)) {
+        for (const device of this.zigbee.devicesIterator(utils.deviceNotCoordinator)) {
             const payload = this.state.get(device);
             const lastSeen = settings.get().advanced.last_seen;
-            /* istanbul ignore if */
-            if (lastSeen !== 'disable') {
-                payload.last_seen = utils.formatDate(device.zh.lastSeen, lastSeen);
+
+            if (lastSeen !== "disable") {
+                payload.last_seen = utils.formatDate(device.zh.lastSeen ?? /* v8 ignore next */ 0, lastSeen);
             }
 
             if (device.zh.linkquality !== undefined) {
@@ -155,19 +196,34 @@ export default class Frontend extends Extension {
         }
     }
 
-    @bind private onMQTTPublishMessage(data: eventdata.MQTTMessagePublished): void {
-        /* istanbul ignore else */
-        if (data.topic.startsWith(`${this.mqttBaseTopic}/`)) {
-            // Send topic without base_topic
-            const topic = data.topic.substring(this.mqttBaseTopic.length + 1);
-            const payload = utils.parseJSON(data.payload, data.payload);
+    @bind private onMQTTPublishMessageOrEntityState(data: eventdata.MQTTMessagePublished | eventdata.PublishEntityState): void {
+        let topic: string;
+        let payload: KeyValue | string;
 
-            for (const client of this.wss.clients) {
-                /* istanbul ignore else */
-                if (client.readyState === WebSocket.OPEN) {
-                    client.send(stringify({topic, payload}));
-                }
+        if ("topic" in data) {
+            // MQTTMessagePublished
+            if (data.options.meta.isEntityState || !data.topic.startsWith(`${this.mqttBaseTopic}/`)) {
+                // Don't send entity state to frontend on `MQTTMessagePublished` event, this is handled by
+                // `PublishEntityState` instead. Reason for this is to skip attribute messages when `output` is
+                // set to `attribute` or `attribute_and_json`, we only want to send JSON entity states to the
+                // frontend.
+                return;
+            }
+            // Send topic without base_topic
+            topic = data.topic.substring(this.mqttBaseTopic.length + 1);
+            payload = utils.parseJSON(data.payload, data.payload);
+        } else {
+            // PublishEntityState
+            topic = data.entity.name;
+            payload = data.message;
+        }
+
+        for (const client of this.wss.clients) {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(stringify({topic, payload}));
             }
         }
     }
 }
+
+export default Frontend;

@@ -1,39 +1,37 @@
-import fs from 'fs';
-import objectAssignDeep from 'object-assign-deep';
+import {existsSync, readFileSync, writeFileSync} from "node:fs";
 
-import data from './util/data';
-import logger from './util/logger';
-import * as settings from './util/settings';
-import utils from './util/utils';
+import data from "./util/data";
+import logger from "./util/logger";
+import {objectAssignDeep} from "./util/objectAssignDeep";
+import * as settings from "./util/settings";
+import utils from "./util/utils";
 
-const saveInterval = 1000 * 60 * 5; // 5 minutes
-
-const dontCacheProperties = [
-    'action',
-    'action_.*',
-    'button',
-    'button_left',
-    'button_right',
-    'click',
-    'forgotten',
-    'keyerror',
-    'step_size',
-    'transition_time',
-    'group_list',
-    'group_capacity',
-    'no_occupancy_since',
-    'step_mode',
-    'transition_time',
-    'duration',
-    'elapsed',
-    'from_side',
-    'to_side',
+const SAVE_INTERVAL = 1000 * 60 * 5; // 5 minutes
+const CACHE_IGNORE_PROPERTIES = [
+    "action",
+    "action_.*",
+    "button",
+    "button_left",
+    "button_right",
+    "forgotten",
+    "keyerror",
+    "step_size",
+    "transition_time",
+    "group_list",
+    "group_capacity",
+    "no_occupancy_since",
+    "step_mode",
+    "transition_time",
+    "elapsed",
+    "from_side",
+    "to_side",
+    "illuminance_lux", // removed in z2m 2.0.0
 ];
 
 class State {
-    private state: {[s: string | number]: KeyValue} = {};
-    private file = data.joinPath('state.json');
-    private timer: NodeJS.Timeout = null;
+    private readonly state = new Map<string | number, KeyValue>();
+    private readonly file = data.joinPath("state.json");
+    private timer?: NodeJS.Timeout;
 
     constructor(
         private readonly eventBus: EventBus,
@@ -47,26 +45,43 @@ class State {
         this.load();
 
         // Save the state on every interval
-        this.timer = setInterval(() => this.save(), saveInterval);
+        this.timer = setInterval(() => this.save(), SAVE_INTERVAL);
     }
 
     stop(): void {
-        // Remove any invalid states (ie when the device has left the network) when the system is stopped
-        Object.keys(this.state)
-            .filter((k) => typeof k === 'string' && !this.zigbee.resolveEntity(k)) // string key = ieeeAddr
-            .forEach((k) => delete this.state[k]);
+        // ensure properly started, else this throws undesired errors (e.g. SIGINT during startup)
+        if (this.zigbee.zhController !== undefined) {
+            // Remove any invalid states (ie when the device has left the network) when the system is stopped
+            for (const [key] of this.state) {
+                if (typeof key === "string" && key.startsWith("0x") && !this.zigbee.resolveEntity(key)) {
+                    // string key = ieeeAddr
+                    this.state.delete(key);
+                }
+            }
+        }
 
         clearTimeout(this.timer);
         this.save();
     }
 
+    clear(): void {
+        this.state.clear();
+    }
+
     private load(): void {
-        if (fs.existsSync(this.file)) {
+        this.state.clear();
+
+        if (existsSync(this.file)) {
             try {
-                this.state = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+                const stateObj = JSON.parse(readFileSync(this.file, "utf8")) as KeyValue;
+
+                for (const key in stateObj) {
+                    this.state.set(key.startsWith("0x") ? key : Number.parseInt(key, 10), stateObj[key]);
+                }
+
                 logger.debug(`Loaded state from file ${this.file}`);
-            } catch (e) {
-                logger.debug(`Failed to load state from file ${this.file} (corrupt file?)`);
+            } catch (error) {
+                logger.debug(`Failed to load state from file ${this.file} (corrupt file?) (${(error as Error).message})`);
             }
         } else {
             logger.debug(`Can't load state from file ${this.file} (doesn't exist)`);
@@ -76,40 +91,42 @@ class State {
     private save(): void {
         if (settings.get().advanced.cache_state_persistent) {
             logger.debug(`Saving state to file ${this.file}`);
-            const json = JSON.stringify(this.state, null, 4);
+
+            const json = JSON.stringify(Object.fromEntries(this.state), null, 4);
+
             try {
-                fs.writeFileSync(this.file, json, 'utf8');
-            } catch (e) {
-                logger.error(`Failed to write state to '${this.file}' (${e.message})`);
+                writeFileSync(this.file, json, "utf8");
+            } catch (error) {
+                logger.error(`Failed to write state to '${this.file}' (${error})`);
             }
         } else {
-            logger.debug(`Not saving state`);
+            logger.debug("Not saving state");
         }
     }
 
     exists(entity: Device | Group): boolean {
-        return this.state.hasOwnProperty(entity.ID);
+        return this.state.has(entity.ID);
     }
 
     get(entity: Group | Device): KeyValue {
-        return this.state[entity.ID] || {};
+        return this.state.get(entity.ID) || {};
     }
 
-    set(entity: Group | Device, update: KeyValue, reason: string = null): KeyValue {
-        const fromState = this.state[entity.ID] || {};
+    set(entity: Group | Device, update: KeyValue, reason?: string): KeyValue {
+        const fromState = this.state.get(entity.ID) || {};
         const toState = objectAssignDeep({}, fromState, update);
         const newCache = {...toState};
         const entityDontCacheProperties = entity.options.filtered_cache || [];
 
-        utils.filterProperties(dontCacheProperties.concat(entityDontCacheProperties), newCache);
+        utils.filterProperties(CACHE_IGNORE_PROPERTIES.concat(entityDontCacheProperties), newCache);
 
-        this.state[entity.ID] = newCache;
+        this.state.set(entity.ID, newCache);
         this.eventBus.emitStateChange({entity, from: fromState, to: toState, reason, update});
         return toState;
     }
 
-    remove(ID: string | number): void {
-        delete this.state[ID];
+    remove(id: string | number): boolean {
+        return this.state.delete(id);
     }
 }
 
